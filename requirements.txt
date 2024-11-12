@@ -1,0 +1,7 @@
+llama-cpp-python==0.2.11
+pandas==2.1.1
+numpy==1.24.3
+requests==2.31.0
+qdrant-client==1.6.4
+tqdm==4.66.1
+python-dotenv==1.0.0 
