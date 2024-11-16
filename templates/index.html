@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSV Processor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .column-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .loading-spinner {
+            display: none;
+            margin-left: 10px;
+        }
+        .loading .loading-spinner {
+            display: inline-block;
+        }
+        #processButton:disabled {
+            cursor: not-allowed;
+        }
+        #downloadButton {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h2>CSV Processing Tool</h2>
+        
+        <!-- File Upload -->
+        <div class="mb-4">
+            <label for="csvFile" class="form-label">Upload CSV File</label>
+            <input type="file" class="form-control" id="csvFile" accept=".csv">
+        </div>
+
+        <!-- Collection Name -->
+        <div class="mb-4">
+            <label for="collectionName" class="form-label">Collection Name</label>
+            <input type="text" class="form-control" id="collectionName" placeholder="Enter collection name">
+        </div>
+
+        <!-- Batch Size -->
+        <div class="mb-4">
+            <label for="batchSize" class="form-label">Batch Size</label>
+            <input type="number" class="form-control" id="batchSize" value="32" min="1" max="100">
+            <small class="text-muted">Number of texts to process at once (1-100)</small>
+        </div>
+
+        <!-- Column Selection -->
+        <div class="mb-4">
+            <h4>Select Columns to Process</h4>
+            <div id="columnList" class="column-list border p-3">
+                <!-- Columns will be added here dynamically -->
+            </div>
+        </div>
+
+        <!-- Process Button with Spinner -->
+        <div class="d-flex align-items-center mb-3">
+            <button id="processButton" class="btn btn-primary" disabled>
+                Process and Upload to Qdrant
+            </button>
+            <div class="loading-spinner spinner-border spinner-border-sm text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+        </div>
+
+        <!-- Download Button -->
+        <div class="mb-3">
+            <a id="downloadButton" href="/download_processed" class="btn btn-success" download>
+                Download Processed Text File
+            </a>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="progress mt-3" style="display: none;" id="progressBar">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                 role="progressbar" 
+                 style="width: 0%">
+            </div>
+        </div>
+
+        <!-- Status Messages -->
+        <div id="status" class="mt-3"></div>
+
+        <!-- Detailed Log -->
+        <div id="logContainer" class="mt-3">
+            <div id="processingLog" class="border p-3 bg-light" style="max-height: 200px; overflow-y: auto; display: none;">
+            </div>
+        </div>
+
+        <!-- Preview Container -->
+        <div class="mb-3">
+            <div id="previewContainer" style="display: none;">
+                <h4>Preview of Processed Text</h4>
+                <div class="border p-3 bg-light mb-2" style="max-height: 200px; overflow-y: auto;">
+                    <pre id="textPreview" style="white-space: pre-wrap;"></pre>
+                </div>
+                <div id="fileInfo" class="text-muted small"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFilePath = null;
+        let isProcessing = false;
+
+        document.getElementById('csvFile').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            // Check file size
+            const maxSize = 16 * 1024 * 1024; // 16MB
+            if (file.size > maxSize) {
+                showStatus(`File too large. Maximum size is ${maxSize/(1024*1024)}MB`, 'danger');
+                return;
+            }
+
+            showStatus('Uploading file...', 'info');
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (data.error) {
+                    showStatus(data.error, 'danger');
+                    return;
+                }
+
+                currentFilePath = data.filepath;
+                displayColumns(data.headers);
+                document.getElementById('processButton').disabled = false;
+                document.getElementById('downloadButton').style.display = 'none';
+                showStatus('File uploaded successfully. Please select columns to process.', 'success');
+
+                if (data.row_count) {
+                    addToLog(`File info: ${data.row_count} rows, ${data.file_size_mb}MB`);
+                }
+            } catch (error) {
+                showStatus('Error uploading file: ' + error.message, 'danger');
+            }
+        });
+
+        function displayColumns(headers) {
+            const columnList = document.getElementById('columnList');
+            columnList.innerHTML = headers.map(header => `
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="${header}" id="col_${header}">
+                    <label class="form-check-label" for="col_${header}">
+                        ${header}
+                    </label>
+                </div>
+            `).join('');
+        }
+
+        function updateProgress(progress) {
+            const progressBar = document.getElementById('progressBar');
+            const progressBarInner = progressBar.querySelector('.progress-bar');
+            progressBar.style.display = 'flex';
+            progressBarInner.style.width = `${progress}%`;
+            progressBarInner.setAttribute('aria-valuenow', progress);
+        }
+
+        function addToLog(message) {
+            const log = document.getElementById('processingLog');
+            log.style.display = 'block';
+            const timestamp = new Date().toLocaleTimeString();
+            log.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+            log.scrollTop = log.scrollHeight;
+        }
+
+        async function showPreview() {
+            try {
+                const response = await fetch('/preview_processed');
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                const previewContainer = document.getElementById('previewContainer');
+                const textPreview = document.getElementById('textPreview');
+                const fileInfo = document.getElementById('fileInfo');
+                
+                textPreview.textContent = data.preview.join('\n');
+                fileInfo.textContent = `File size: ${data.file_size} | Total lines: ${data.total_lines}`;
+                previewContainer.style.display = 'block';
+            } catch (error) {
+                console.error('Preview error:', error);
+            }
+        }
+
+        document.getElementById('processButton').addEventListener('click', async () => {
+            if (isProcessing) return;
+
+            const collectionName = document.getElementById('collectionName').value;
+            if (!collectionName) {
+                showStatus('Please enter a collection name', 'danger');
+                return;
+            }
+
+            const selectedColumns = Array.from(document.querySelectorAll('#columnList input:checked'))
+                .map(checkbox => checkbox.value);
+
+            if (selectedColumns.length === 0) {
+                showStatus('Please select at least one column', 'danger');
+                return;
+            }
+
+            const batchSize = parseInt(document.getElementById('batchSize').value) || 32;
+            if (batchSize < 1 || batchSize > 100) {
+                showStatus('Batch size must be between 1 and 100', 'danger');
+                return;
+            }
+
+            isProcessing = true;
+            const button = document.getElementById('processButton');
+            button.disabled = true;
+            button.classList.add('loading');
+            document.getElementById('progressBar').style.display = 'flex';
+            document.getElementById('processingLog').innerHTML = '';
+            document.getElementById('downloadButton').style.display = 'none';
+            updateProgress(0);
+            showStatus('Processing started...', 'info');
+            addToLog('Starting processing...');
+
+            try {
+                const response = await fetch('/process', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        filepath: currentFilePath,
+                        collection_name: collectionName,
+                        selected_columns: selectedColumns,
+                        batch_size: batchSize
+                    })
+                });
+
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || 'Processing failed');
+                }
+
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                updateProgress(100);
+                showStatus('Processing complete!', 'success');
+                addToLog('Processing completed successfully');
+                
+                // Show download button if processed file is available
+                if (data.has_processed_file) {
+                    document.getElementById('downloadButton').style.display = 'inline-block';
+                    addToLog('Processed text file is ready for download');
+                    await showPreview();  // Show preview after processing
+                }
+            } catch (error) {
+                updateProgress(0);
+                showStatus('Error: ' + error.message, 'danger');
+                addToLog('Error occurred: ' + error.message);
+            } finally {
+                isProcessing = false;
+                button.disabled = false;
+                button.classList.remove('loading');
+            }
+        });
+
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+        }
+    </script>
+</body>
+</html> 

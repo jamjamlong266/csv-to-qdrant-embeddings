@@ -1,5 +1,4 @@
 import pandas as pd
-from llama_cpp import Llama
 import numpy as np
 from pathlib import Path
 import requests
@@ -7,21 +6,8 @@ import os
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from qdrant_client.http.models import UpdateStatus
-
-def download_model(url, model_path):
-    """Download the model if it doesn't exist"""
-    if not os.path.exists(model_path):
-        print(f"Downloading model to {model_path}...")
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        
-        with open(model_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        print("Download complete!")
+from transformers import AutoModel, AutoTokenizer
+import torch
 
 def create_text_for_embedding(row):
     """Create a single text string from relevant fields"""
@@ -80,46 +66,59 @@ def upload_to_qdrant(client, collection_name, embeddings, texts, metadata_df):
             print(f"Uploaded batch of {len(points)} vectors")
             points = []
 
+def get_embeddings(texts, model, tokenizer, batch_size=32):
+    """Get embeddings for a list of texts in batches"""
+    embeddings = []
+    
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i + batch_size]
+        
+        # Tokenize texts
+        encoded_input = tokenizer(
+            batch_texts,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors='pt'
+        )
+        
+        # Get model output
+        with torch.no_grad():
+            model_output = model(**encoded_input)
+            
+        # Use [CLS] token embeddings
+        batch_embeddings = model_output.last_hidden_state[:, 0, :].numpy()
+        embeddings.extend(batch_embeddings)
+        
+        if (i + batch_size) % 100 == 0:
+            print(f"Processed {i + batch_size} texts...")
+    
+    return np.array(embeddings)
+
 def main():
-    # Model settings
-    model_url = "https://huggingface.co/gaianet/Nomic-embed-text-v1.5-Embedding-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf"
-    model_path = "models/nomic-embed-text-v1.5.f16.gguf"
-    
-    # Download model
-    download_model(model_url, model_path)
-    
-    # Initialize the model
-    llm = Llama(
-        model_path=model_path,
-        embedding=True,
-        n_ctx=2048
-    )
+    # Initialize model and tokenizer
+    model_name = "sentence-transformers/all-MiniLM-L6-v2"
+    print(f"Loading model: {model_name}")
+    model = AutoModel.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     # Initialize Qdrant client
     qdrant_client = QdrantClient("localhost", port=6333)
-    collection_name = "reddit_posts"
+    collection_name = "new_reddit_posts"
     
     # Read CSV file
     df = pd.read_csv('posts.csv')
     
-    # Create embeddings
-    embeddings = []
-    texts = []
+    # Create texts for embedding
+    print("Creating texts for embedding...")
+    texts = [create_text_for_embedding(row) for _, row in df.iterrows()]
     
+    # Get embeddings
     print("Creating embeddings...")
-    for idx, row in df.iterrows():
-        text = create_text_for_embedding(row)
-        texts.append(text)
-        embedding = llm.embed(text)
-        embeddings.append(embedding)
-        if (idx + 1) % 10 == 0:
-            print(f"Processed {idx + 1} rows...")
+    embeddings_array = get_embeddings(texts, model, tokenizer)
     
-    # Convert embeddings to numpy array
-    embeddings_array = np.array(embeddings)
-    
-    # Get vector size from first embedding
-    vector_size = len(embeddings[0])
+    # Get vector size
+    vector_size = embeddings_array.shape[1]
     
     # Create Qdrant collection
     create_qdrant_collection(qdrant_client, collection_name, vector_size)
